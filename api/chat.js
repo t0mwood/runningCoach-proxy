@@ -1,9 +1,13 @@
 export default async function handler(req, res) {
   // Cost guardrails (server-side)
-  const MAX_USER_CHARS = 500;
   const MAX_MESSAGES = 10;
   const MAX_OUTPUT_TOKENS = 200; // keeps replies short and cheap
   const TIMEOUT_MS = 12000;
+
+  // Default production limit
+  const PROD_MAX_USER_CHARS = 500;
+  // Higher limit for Xcode Debug builds only
+  const DEBUG_MAX_USER_CHARS = 5000;
 
   // Allow preflight
   if (req.method === "OPTIONS") {
@@ -38,19 +42,34 @@ export default async function handler(req, res) {
       .json({ error: `Too many messages (max ${MAX_MESSAGES})` });
   }
 
-  const lastUser = [...messages].reverse().find((m) => m.role === "user")?.text;
+  const lastUser = [...messages]
+    .reverse()
+    .find((m) => m.role === "user")?.text;
 
-  if (!lastUser) return res.status(400).json({ error: "No user message" });
+  if (!lastUser) {
+    return res.status(400).json({ error: "No user message" });
+  }
 
   if (typeof lastUser !== "string" || lastUser.trim().length === 0) {
     return res.status(400).json({ error: "Empty user message" });
   }
 
+  // --- Debug-only bypass logic ---
+  const debugToken = req.headers["x-debug-token"];
+  const isDebug =
+    typeof debugToken === "string" &&
+    debugToken === process.env.DEBUG_TOKEN;
+
+  const MAX_USER_CHARS = isDebug
+    ? DEBUG_MAX_USER_CHARS
+    : PROD_MAX_USER_CHARS;
+
   if (lastUser.length > MAX_USER_CHARS) {
-    return res
-      .status(400)
-      .json({ error: `Message too long (max ${MAX_USER_CHARS} chars)` });
+    return res.status(400).json({
+      error: `Message too long (max ${MAX_USER_CHARS} chars)`,
+    });
   }
+  // --- End debug bypass ---
 
   const system = `
 You are Coach - calm, concise, and opinionated.
@@ -61,7 +80,9 @@ You are Coach - calm, concise, and opinionated.
   `.trim();
 
   const key = process.env.OPENAI_API_KEY;
-  if (!key) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  if (!key) {
+    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  }
 
   // Timeout protection
   const controller = new AbortController();
