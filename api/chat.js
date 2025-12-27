@@ -1,9 +1,10 @@
 export default async function handler(req, res) {
   const TIMEOUT_MS = 12000;
 
-  // Default production limits
+  // Production limits
   const PROD_MAX_USER_CHARS = 500;
-  // Higher limit for Xcode Debug builds only
+
+  // Debug (Xcode) limits
   const DEBUG_MAX_USER_CHARS = 5000;
 
   // Allow preflight
@@ -40,23 +41,21 @@ export default async function handler(req, res) {
     .reverse()
     .find((m) => m && m.role === "user")?.text;
 
-  if (!lastUser) {
-    return res.status(400).json({ error: "No user message" });
+  if (!lastUser || typeof lastUser !== "string" || lastUser.trim().length === 0) {
+    return res.status(400).json({ error: "No valid user message" });
   }
 
-  if (typeof lastUser !== "string" || lastUser.trim().length === 0) {
-    return res.status(400).json({ error: "Empty user message" });
-  }
-
-  // --- Debug-only bypass logic ---
+  // --- Debug detection ---
   const debugToken = req.headers["x-debug-token"];
   const isDebug =
-    typeof debugToken === "string" && debugToken === process.env.DEBUG_TOKEN;
+    typeof debugToken === "string" &&
+    debugToken === process.env.DEBUG_TOKEN;
 
   const MAX_MESSAGES = isDebug ? 200 : 10;
-  const MAX_OUTPUT_TOKENS = isDebug ? 700 : 220; // longer replies in Xcode builds
-
-  const MAX_USER_CHARS = isDebug ? DEBUG_MAX_USER_CHARS : PROD_MAX_USER_CHARS;
+  const MAX_OUTPUT_TOKENS = isDebug ? 700 : 220;
+  const MAX_USER_CHARS = isDebug
+    ? DEBUG_MAX_USER_CHARS
+    : PROD_MAX_USER_CHARS;
 
   if (lastUser.length > MAX_USER_CHARS) {
     return res.status(400).json({
@@ -69,48 +68,35 @@ export default async function handler(req, res) {
       .status(400)
       .json({ error: `Too many messages (max ${MAX_MESSAGES})` });
   }
-  // --- End debug bypass ---
+  // --- End debug logic ---
 
-  // Normalize and validate message format before sending upstream
-  const normalized = messages
+  // Normalise messages before sending upstream
+  const normalised = messages
     .map((m) => {
-      const role = m?.role;
-      const text = m?.text;
-      if (role !== "user" && role !== "assistant") return null;
-      if (typeof text !== "string") return null;
-      const trimmed = text.trim();
+      if (!m || (m.role !== "user" && m.role !== "assistant")) return null;
+      if (typeof m.text !== "string") return null;
+      const trimmed = m.text.trim();
       if (!trimmed) return null;
-      return { role, content: trimmed };
+      return { role: m.role, content: trimmed };
     })
     .filter(Boolean);
 
-  if (normalized.length === 0) {
-    return res.status(400).json({ error: "No valid messages" });
+  if (normalised.length === 0) {
+    return res.status(400).json({ error: "No valid messages after normalisation" });
   }
 
+  // Neutral system prompt - Milo persona lives in the app (Xcode)
   const system = `
-You are Milo - a calm, human-sounding running coach and supportive friend.
-
-Vibe:
-- Warm, grounded, and slightly playful - like texting a close friend who happens to be a great coach.
-- Anti-anxiety by default - no guilt, no pressure, no catastrophising.
-- Motivating, but not hypey or robotic.
-
-Rules:
-- If you do not have enough context to answer safely or specifically, ask 1-3 short questions first. Do not guess.
-- Be concrete and useful. Prefer specific next steps over generic motivation.
-- Keep replies concise by default unless the user asks for detail.
-- Be holistic: running, recovery, strength, mobility, sleep, hydration, basic sports nutrition.
-- If the user asks about something clearly outside that scope, briefly say you can’t help with that and redirect back to running or training.
-- Safety: if injury/medical red flags come up, encourage professional help and give low-risk guidance.
-  `.trim();
+You are a helpful assistant.
+Follow the conversation exactly.
+Do not introduce your own persona or override instructions.
+`.trim();
 
   const key = process.env.OPENAI_API_KEY;
   if (!key) {
     return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
   }
 
-  // Timeout protection
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -125,7 +111,7 @@ Rules:
       body: JSON.stringify({
         model: "gpt-4o-mini",
         max_output_tokens: MAX_OUTPUT_TOKENS,
-        input: [{ role: "system", content: system }, ...normalized],
+        input: [{ role: "system", content: system }, ...normalised],
       }),
     });
 
